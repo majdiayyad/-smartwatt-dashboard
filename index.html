@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SmartWatt — Energy Monitor</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
   :root {
     --bg: #0E1216;
@@ -314,34 +313,46 @@ async function loadDeviceCards(readings) {
   });
 }
 
+function formatTime(isoString) {
+  const d = new Date(isoString);
+  return d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0") + ":" + d.getSeconds().toString().padStart(2, "0");
+}
+
 function loadChart(readings) {
   const byDevice = {};
-  readings.slice(0, 100).reverse().forEach(r => {
-    if (!byDevice[r.deviceId]) byDevice[r.deviceId] = [];
-    byDevice[r.deviceId].push({ x: r.timestamp, y: r.watts });
+  const sorted = readings.slice(0, 60).reverse();
+  const labels = [...new Set(sorted.map(r => formatTime(r.timestamp)))];
+
+  sorted.forEach(r => {
+    if (!byDevice[r.deviceId]) byDevice[r.deviceId] = {};
+    byDevice[r.deviceId][formatTime(r.timestamp)] = r.watts;
   });
 
   const datasets = Object.keys(byDevice).sort().map((deviceId, i) => ({
     label: deviceId,
-    data: byDevice[deviceId],
+    data: labels.map(l => byDevice[deviceId][l] ?? null),
     borderColor: COLORS[i % COLORS.length],
     backgroundColor: "transparent",
     borderWidth: 1.5,
     pointRadius: 0,
     tension: 0.25,
+    spanGaps: true,
   }));
 
   const ctx = document.getElementById("powerChart");
-  if (chart) chart.destroy();
+  if (chart) {
+    chart.destroy();
+    chart = null;
+  }
   chart = new Chart(ctx, {
     type: "line",
-    data: { datasets },
+    data: { labels, datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "nearest", intersect: false },
       scales: {
-        x: { type: "time", time: { unit: "minute" }, ticks: { color: "#7C8894", maxTicksLimit: 6 }, grid: { color: "#262E37" } },
+        x: { ticks: { color: "#7C8894", maxTicksLimit: 6 }, grid: { color: "#262E37" } },
         y: { ticks: { color: "#7C8894" }, grid: { color: "#262E37" } },
       },
       plugins: {
