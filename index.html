@@ -436,6 +436,8 @@ async function saveZone(deviceId) {
   msg.classList.add("show");
   setTimeout(() => msg.classList.remove("show"), 1500);
 }
+
+function loadAlerts(alerts) {
   const container = document.getElementById("alertsList");
   if (!alerts.length) {
     container.innerHTML = '<div class="empty-state">No alerts yet.</div>';
