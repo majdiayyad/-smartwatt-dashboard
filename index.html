@@ -125,6 +125,13 @@
     font-family: var(--mono);
   }
 
+  .card-cost {
+    font-size: 12px;
+    color: var(--amber);
+    margin-top: 3px;
+    font-family: var(--mono);
+  }
+
   .led {
     width: 6px;
     height: 6px;
@@ -256,14 +263,20 @@
   <div class="panel">
     <h2>Power draw — last readings</h2>
     <div class="chart-wrap"><canvas id="powerChart"></canvas></div>
+
+    <h2 style="margin-top:22px;">Cost by zone</h2>
+    <div id="zoneList"></div>
   </div>
 
   <div class="panel">
     <h2>Recent alerts</h2>
     <div id="alertsList"><div class="empty-state">No alerts yet.</div></div>
 
-    <h2 style="margin-top:22px;">Thresholds</h2>
+    <h2 style="margin-top:22px;">Thresholds &amp; rate</h2>
     <div id="settingsList"></div>
+
+    <h2 style="margin-top:22px;">Zones</h2>
+    <div id="zoneEditList"></div>
   </div>
 </div>
 
@@ -286,7 +299,7 @@ function timeAgo(isoString) {
   return Math.floor(diff / 3600) + "h ago";
 }
 
-async function loadDeviceCards(readings) {
+async function loadDeviceCards(readings, deviceMeta) {
   const grid = document.getElementById("deviceGrid");
   grid.innerHTML = "";
 
@@ -297,8 +310,15 @@ async function loadDeviceCards(readings) {
     }
   });
 
+  const metaByDevice = {};
+  deviceMeta.forEach(d => { metaByDevice[d.deviceId] = d; });
+
   Object.keys(byDevice).sort().forEach(deviceId => {
     const r = byDevice[deviceId];
+    const meta = metaByDevice[deviceId] || {};
+    const zone = meta.zone || "Unassigned";
+    const costPerHour = meta.costPerHourEur ?? 0;
+
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
@@ -307,7 +327,8 @@ async function loadDeviceCards(readings) {
         <span class="led ${r.isAnomaly ? 'hot' : ''}"></span>
       </div>
       <div class="card-value ${r.isAnomaly ? 'anomaly' : ''}">${r.watts.toFixed(1)}<span class="card-unit">W</span></div>
-      <div class="card-sub">${timeAgo(r.timestamp)}</div>
+      <div class="card-sub">${timeAgo(r.timestamp)} · ${zone}</div>
+      <div class="card-cost">€${costPerHour.toFixed(3)}/h</div>
     `;
     grid.appendChild(card);
   });
@@ -362,7 +383,59 @@ function loadChart(readings) {
   });
 }
 
-function loadAlerts(alerts) {
+function loadZoneSummary(devices) {
+  const container = document.getElementById("zoneList");
+  const byZone = {};
+  devices.forEach(d => {
+    const zone = d.zone || "Unassigned";
+    byZone[zone] = (byZone[zone] || 0) + (d.costPerHourEur || 0);
+  });
+
+  const zones = Object.keys(byZone).sort();
+  if (!zones.length) {
+    container.innerHTML = '<div class="empty-state">No devices yet.</div>';
+    return;
+  }
+  container.innerHTML = zones.map(zone => `
+    <div class="alert-row">
+      <div class="alert-device" style="color:var(--cyan);">${zone}</div>
+      <div class="alert-meta">€${byZone[zone].toFixed(3)}/h</div>
+    </div>
+  `).join("");
+}
+
+function loadZoneEditor(devices) {
+  const container = document.getElementById("zoneEditList");
+  container.innerHTML = "";
+
+  devices.sort((a, b) => a.deviceId.localeCompare(b.deviceId)).forEach(d => {
+    const row = document.createElement("div");
+    row.className = "settings-row";
+    row.innerHTML = `
+      <label>${d.deviceId}</label>
+      <input type="text" placeholder="zone" value="${d.zone && d.zone !== 'Unassigned' ? d.zone : ''}" id="zone-${d.deviceId}" style="width:110px; text-align:left;">
+      <button onclick="saveZone('${d.deviceId}')">Set</button>
+      <span class="save-msg" id="zonemsg-${d.deviceId}">saved</span>
+    `;
+    container.appendChild(row);
+  });
+}
+
+async function saveZone(deviceId) {
+  const input = document.getElementById(`zone-${deviceId}`);
+  const zone = input.value.trim();
+  if (!zone) return;
+
+  await fetch(`${API_BASE}/devicemeta`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deviceId, zone }),
+  });
+
+  const msg = document.getElementById(`zonemsg-${deviceId}`);
+  msg.classList.add("show");
+  setTimeout(() => msg.classList.remove("show"), 1500);
+}
   const container = document.getElementById("alertsList");
   if (!alerts.length) {
     container.innerHTML = '<div class="empty-state">No alerts yet.</div>';
@@ -386,17 +459,20 @@ async function loadSettings(devices) {
   const deviceIds = [...new Set(devices.map(d => d.deviceId))].sort();
 
   for (const deviceId of deviceIds) {
-    let current = null;
+    let currentThreshold = null;
+    let currentRate = 0.25;
     try {
       const s = await fetchJSON(`${API_BASE}/settings?deviceId=${deviceId}`);
-      current = s.thresholdWatts;
+      currentThreshold = s.thresholdWatts;
+      currentRate = s.rateEurPerKwh ?? 0.25;
     } catch (e) { /* no setting yet */ }
 
     const row = document.createElement("div");
     row.className = "settings-row";
     row.innerHTML = `
       <label>${deviceId}</label>
-      <input type="number" step="1" placeholder="auto (3x avg)" value="${current ?? ''}" id="input-${deviceId}">
+      <input type="number" step="1" placeholder="auto (3x avg)" value="${currentThreshold ?? ''}" id="input-${deviceId}" title="Threshold (W)">
+      <input type="number" step="0.01" value="${currentRate}" id="rate-${deviceId}" style="width:60px;" title="€/kWh">
       <button onclick="saveThreshold('${deviceId}')">Set</button>
       <span class="save-msg" id="msg-${deviceId}">saved</span>
     `;
@@ -405,14 +481,19 @@ async function loadSettings(devices) {
 }
 
 async function saveThreshold(deviceId) {
-  const input = document.getElementById(`input-${deviceId}`);
-  const value = parseFloat(input.value);
-  if (isNaN(value)) return;
+  const thresholdInput = document.getElementById(`input-${deviceId}`);
+  const rateInput = document.getElementById(`rate-${deviceId}`);
+  const thresholdWatts = parseFloat(thresholdInput.value);
+  const rateEurPerKwh = parseFloat(rateInput.value);
+
+  const body = { deviceId };
+  if (!isNaN(thresholdWatts)) body.thresholdWatts = thresholdWatts;
+  if (!isNaN(rateEurPerKwh)) body.rateEurPerKwh = rateEurPerKwh;
 
   await fetch(`${API_BASE}/settings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ deviceId, thresholdWatts: value }),
+    body: JSON.stringify(body),
   });
 
   const msg = document.getElementById(`msg-${deviceId}`);
@@ -428,10 +509,14 @@ async function refresh() {
       fetchJSON(`${API_BASE}/devices`),
     ]);
 
-    await loadDeviceCards(readings);
+    const deviceList = devices.length ? devices : readings.map(r => ({ deviceId: r.deviceId, zone: "Unassigned", costPerHourEur: 0 }));
+
+    await loadDeviceCards(readings, deviceList);
     loadChart(readings);
     loadAlerts(alerts);
-    await loadSettings(devices.length ? devices : readings.map(r => ({ deviceId: r.deviceId })));
+    loadZoneSummary(deviceList);
+    loadZoneEditor(deviceList);
+    await loadSettings(deviceList);
   } catch (e) {
     console.error("Refresh failed:", e);
   }
